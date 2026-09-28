@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Distribuições locais
+Organizador_Biblioteca_PDF_Windows.zip
+
+# Dados gerados pelo usuário
+__PDF_ORGANIZACAO__/
+Biblioteca_Organizada/
+cache_metadados_publicos.json
+resultado_copia.csv
+
+# Sistema operacional e editores
+.DS_Store
+Thumbs.db
+.vscode/
