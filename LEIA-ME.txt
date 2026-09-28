@@ -1,0 +1,53 @@
+ORGANIZADOR SEGURO DE BIBLIOTECA PDF
+====================================
+
+O que ele faz
+-------------
+1. Lê os metadados e as primeiras páginas dos PDFs.
+2. Detecta duplicados exatos por conteúdo (sem apagar nenhum deles).
+3. Sugere título, autor, ano, assunto e tipo (livro/manual ou artigo).
+4. Gera um relatório para revisão.
+5. Só depois cria CÓPIAS classificadas. Os originais ficam onde estão.
+
+Como usar
+----------
+1. Extraia todos estes arquivos para uma pasta qualquer do Windows.
+2. Dê dois cliques em 01_ANALISAR_PDFS.bat.
+3. Escolha a pasta que contém os seus PDFs, inclusive subpastas.
+4. Ao fim, abra:
+      [sua pasta de PDFs]\__PDF_ORGANIZACAO__\relatorio.html
+5. Para pesquisar ISBN, editora, categorias e descrição em catálogos públicos,
+   dê dois cliques em 03_ENRIQUECER_CATALOGO.bat e escolha a mesma pasta.
+   A consulta envia somente título, autor e DOI detectado. Ela guarda um cache,
+   portanto pode ser interrompida e retomada sem perder o progresso.
+6. Se a proposta estiver boa, dê dois cliques em 02_CRIAR_BIBLIOTECA_SEGURA.bat
+   e selecione a mesma pasta novamente.
+
+Resultado
+---------
+Será criada uma nova pasta:
+      [sua pasta de PDFs]\Biblioteca_Organizada
+
+Ela é organizada assim:
+      Livros\Inicial do autor\Autor\Titulo (Ano).pdf
+
+Os poucos artigos detectados ficam em:
+      Artigos\Inicial do autor\Autor\Titulo (Ano).pdf
+
+Autor e título costumam ser muito mais confiáveis que a classificação de
+assunto. Por isso, a categoria do relatório é apenas uma sugestão e não
+define a pasta final.
+
+Os PDFs que forem cópias exatas são apenas sinalizados no relatório;
+nenhum arquivo é removido automaticamente.
+
+Observações importantes
+------------------------
+- A primeira execução instala a pequena dependência PyMuPDF e pode demorar.
+- PDFs digitalizados como imagem, sem texto pesquisável, podem aparecer como
+  "NAO_LIDO". Eles continuam preservados e podem ser tratados com OCR depois.
+- O arquivo plano_organizacao.csv pode ser aberto no Excel antes da cópia,
+  caso queira corrigir algum título ou categoria manualmente.
+- As fontes públicas utilizadas são Google Books e Open Library para livros,
+  e Crossref para artigos científicos. Um registro só é aceito quando título e,
+  quando disponível, autor apresentam boa correspondência.
