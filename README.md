@@ -66,3 +66,9 @@ py -3 organizar_biblioteca_pdf.py --help
 
 O projeto usa apenas a biblioteca padrão do Python, exceto pelo PyMuPDF para
 leitura dos PDFs.
+
+Para executar os testes locais:
+
+```powershell
+py -3 -m unittest discover -s tests -v
+```
