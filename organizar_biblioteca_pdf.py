@@ -102,7 +102,10 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-GENERIC_TITLES = {"untitled", "sem titulo", "microsoft word", "document", "none", ""}
+GENERIC_TITLES = {
+    "untitled", "sem titulo", "microsoft word", "document", "none", "",
+    "dados de copyright", "copyright", "pagina de rosto", "sumario", "indice",
+}
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 YEAR_RE = re.compile(r"\b(19[0-9]{2}|20[0-2][0-9])\b")
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+\b", re.IGNORECASE)
@@ -289,80 +292,162 @@ def accepted_score(row: dict[str, str], score: float) -> bool:
     return score >= (0.72 if known_author(row) else 0.86)
 
 
+def filename_bibliographic_guess(row: dict[str, str]) -> tuple[str, str]:
+    """Obtém título e autor do nome do arquivo quando ele segue Autor - Título.
+
+    Muitos PDFs foram salvos com um nome bibliograficamente melhor que a primeira
+    página extraída: capa, aviso de copyright e sumário frequentemente aparecem
+    antes do título. O dado é usado apenas como alternativa de busca, nunca como
+    uma confirmação automática.
+    """
+    original = Path(row.get("arquivo_original", "")).stem.replace("_", " ")
+    original = re.sub(r"\s*\((?:\d+|copia)\)\s*$", "", original, flags=re.IGNORECASE)
+    original = compact(original, 260)
+    parts = re.split(r"\s+-\s+", original, maxsplit=1)
+    if len(parts) == 2 and useful_title(parts[1]) and len(parts[0]) >= 2:
+        return compact(parts[1], 180), compact(parts[0], 100)
+    return compact(original, 180), compact(row.get("autor_detectado", ""), 100)
+
+
+def search_title_variants(title: str) -> list[str]:
+    """Retorna poucas variações seguras para uma busca bibliográfica."""
+    title = compact(title, 180)
+    variants = [title]
+    # Catálogos divergem entre título completo, subtítulo e indicação de volume.
+    without_parenthetical = compact(re.sub(r"\s*[\[(][^\]\)]{1,90}[\])]\s*", " ", title), 180)
+    if useful_title(without_parenthetical):
+        variants.append(without_parenthetical)
+    for separator in (":", " | "):
+        if separator in title:
+            main_title = compact(title.split(separator, 1)[0], 180)
+            if useful_title(main_title):
+                variants.append(main_title)
+    unique: list[str] = []
+    for value in variants:
+        if useful_title(value) and normalized_bibliographic_text(value) not in {
+            normalized_bibliographic_text(existing) for existing in unique
+        }:
+            unique.append(value)
+    return unique[:3]
+
+
+def bibliographic_query_variants(row: dict[str, str]) -> list[dict[str, str]]:
+    """Monta consultas alternativas sem alterar os dados locais do PDF."""
+    current_title = compact(row.get("titulo_detectado", ""), 180)
+    current_author = compact(row.get("autor_detectado", ""), 100)
+    file_title, file_author = filename_bibliographic_guess(row)
+    bases: list[tuple[str, str]] = []
+    # Quando o texto extraído é genérico, o nome estruturado do arquivo é a fonte
+    # mais confiável para começar. Nos demais casos preservamos a ordem original.
+    if not useful_title(current_title) and useful_title(file_title):
+        bases.append((file_title, file_author))
+    if useful_title(current_title):
+        bases.append((current_title, current_author))
+    if useful_title(file_title):
+        bases.append((file_title, file_author))
+
+    variants: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for title, author in bases:
+        for title_variant in search_title_variants(title):
+            normalized = (
+                normalized_bibliographic_text(title_variant),
+                normalized_bibliographic_text(author),
+            )
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            query_row = dict(row)
+            query_row["titulo_detectado"] = title_variant
+            query_row["autor_detectado"] = author or row.get("autor_detectado", "")
+            variants.append(query_row)
+    return variants[:4] or [dict(row)]
+
+
 def google_books_lookup(row: dict[str, str], state: dict[str, bool]) -> tuple[dict[str, Any] | None, bool]:
     if not state.get("google_books", True):
         return None, False
-    terms = [f'intitle:"{row["titulo_detectado"]}"']
+    title = row["titulo_detectado"]
+    author = row.get("autor_detectado", "")
+    terms = [f'intitle:"{title}"']
     if known_author(row):
-        terms.append(f'inauthor:"{row["autor_detectado"]}"')
-    params: dict[str, str | int] = {"q": " ".join(terms), "maxResults": 5, "printType": "books"}
+        terms.append(f'inauthor:"{author}"')
     api_key = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
-    if api_key:
-        params["key"] = api_key
-    data, error = fetch_json("https://www.googleapis.com/books/v1/volumes?" + urlencode(params))
-    if data is None:
-        if error in {"HTTP 403", "HTTP 429"}:
-            state["google_books"] = False
-            print("  Google Books atingiu o limite disponível; continuando com Open Library.")
-        return None, False
     best: tuple[float, dict[str, Any]] | None = None
-    for item in data.get("items", []):
-        info = item.get("volumeInfo", {})
-        title = str(info.get("title", ""))
-        authors = [str(author) for author in info.get("authors", [])]
-        score = metadata_score(row, title, authors)
-        if best is None or score > best[0]:
-            identifiers = {entry.get("type"): entry.get("identifier") for entry in info.get("industryIdentifiers", [])}
-            best = (score, {
-                "title": title,
-                "authors": authors,
-                "year": first_year(info.get("publishedDate")),
-                "isbn_13": str(identifiers.get("ISBN_13", "")),
-                "isbn_10": str(identifiers.get("ISBN_10", "")),
-                "publisher": str(info.get("publisher", "")),
-                "language": str(info.get("language", "")),
-                "subjects": [str(value) for value in info.get("categories", [])],
-                "description": short_description(str(info.get("description", ""))),
-                "source": "Google Books",
-                "url": str(info.get("infoLink") or f"https://books.google.com/books?id={item.get('id', '')}"),
-                "score": score,
-            })
+    # O segundo formato é menos rígido e recupera títulos com subtítulo,
+    # pontuação ou transliteração diferentes no catálogo do Google.
+    queries = [" ".join(terms), " ".join(filter(None, [title, author if known_author(row) else ""]))]
+    for query in dict.fromkeys(queries):
+        params: dict[str, str | int] = {"q": query, "maxResults": 8, "printType": "books"}
+        if api_key:
+            params["key"] = api_key
+        data, error = fetch_json("https://www.googleapis.com/books/v1/volumes?" + urlencode(params))
+        if data is None:
+            if error in {"HTTP 403", "HTTP 429"}:
+                state["google_books"] = False
+                state["google_books_error"] = error
+                print("  Google Books indisponível nesta sessão; continuando com Open Library.")
+            return None, False
+        for item in data.get("items", []):
+            info = item.get("volumeInfo", {})
+            candidate_title = str(info.get("title", ""))
+            authors = [str(candidate_author) for candidate_author in info.get("authors", [])]
+            score = metadata_score(row, candidate_title, authors)
+            if best is None or score > best[0]:
+                identifiers = {entry.get("type"): entry.get("identifier") for entry in info.get("industryIdentifiers", [])}
+                best = (score, {
+                    "title": candidate_title,
+                    "authors": authors,
+                    "year": first_year(info.get("publishedDate")),
+                    "isbn_13": str(identifiers.get("ISBN_13", "")),
+                    "isbn_10": str(identifiers.get("ISBN_10", "")),
+                    "publisher": str(info.get("publisher", "")),
+                    "language": str(info.get("language", "")),
+                    "subjects": [str(value) for value in info.get("categories", [])],
+                    "description": short_description(str(info.get("description", ""))),
+                    "source": "Google Books",
+                    "url": str(info.get("infoLink") or f"https://books.google.com/books?id={item.get('id', '')}"),
+                    "score": score,
+                })
     return (best[1] if best and accepted_score(row, best[0]) else None), True
 
 
 def open_library_lookup(row: dict[str, str]) -> tuple[dict[str, Any] | None, bool]:
-    params = {
-        "title": row["titulo_detectado"],
-        "limit": 5,
-        "fields": "key,title,author_name,first_publish_year,isbn,subject,publisher,language",
-    }
-    if known_author(row):
-        params["author"] = row["autor_detectado"]
-    data, error = fetch_json("https://openlibrary.org/search.json?" + urlencode(params))
-    if data is None:
-        return None, False
     best: tuple[float, dict[str, Any]] | None = None
-    for item in data.get("docs", []):
-        title = str(item.get("title", ""))
-        authors = [str(author) for author in item.get("author_name", [])]
-        score = metadata_score(row, title, authors)
-        if best is None or score > best[0]:
-            isbns = [str(value) for value in item.get("isbn", [])]
-            key = str(item.get("key", ""))
-            best = (score, {
-                "title": title,
-                "authors": authors,
-                "year": first_year(item.get("first_publish_year")),
-                "isbn_13": first_isbn(isbns, 13),
-                "isbn_10": first_isbn(isbns, 10),
-                "publisher": str((item.get("publisher") or [""])[0]),
-                "language": str((item.get("language") or [""])[0]),
-                "subjects": [str(value) for value in (item.get("subject") or [])[:8]],
-                "description": "",
-                "source": "Open Library",
-                "url": f"https://openlibrary.org{key}" if key else "",
-                "score": score,
-            })
+    fields = "key,title,author_name,first_publish_year,isbn,subject,publisher,language"
+    precise_query: dict[str, str | int] = {"title": row["titulo_detectado"], "limit": 8, "fields": fields}
+    if known_author(row):
+        precise_query["author"] = row["autor_detectado"]
+    broad_query: dict[str, str | int] = {
+        "q": " ".join(filter(None, [row["titulo_detectado"], row.get("autor_detectado", "") if known_author(row) else ""])),
+        "limit": 12,
+        "fields": fields,
+    }
+    for params in (precise_query, broad_query):
+        data, error = fetch_json("https://openlibrary.org/search.json?" + urlencode(params))
+        if data is None:
+            return None, False
+        for item in data.get("docs", []):
+            title = str(item.get("title", ""))
+            authors = [str(author) for author in item.get("author_name", [])]
+            score = metadata_score(row, title, authors)
+            if best is None or score > best[0]:
+                isbns = [str(value) for value in item.get("isbn", [])]
+                key = str(item.get("key", ""))
+                best = (score, {
+                    "title": title,
+                    "authors": authors,
+                    "year": first_year(item.get("first_publish_year")),
+                    "isbn_13": first_isbn(isbns, 13),
+                    "isbn_10": first_isbn(isbns, 10),
+                    "publisher": str((item.get("publisher") or [""])[0]),
+                    "language": str((item.get("language") or [""])[0]),
+                    "subjects": [str(value) for value in (item.get("subject") or [])[:8]],
+                    "description": "",
+                    "source": "Open Library",
+                    "url": f"https://openlibrary.org{key}" if key else "",
+                    "score": score,
+                })
     return (best[1] if best and accepted_score(row, best[0]) else None), True
 
 
@@ -406,23 +491,36 @@ def crossref_lookup(row: dict[str, str]) -> tuple[dict[str, Any] | None, bool]:
 
 
 def lookup_public_metadata(row: dict[str, str], state: dict[str, bool]) -> tuple[dict[str, Any] | None, bool]:
-    """Consulta Crossref para artigos e Google Books/Open Library para livros."""
+    """Consulta fontes públicas com variações seguras de título e autor."""
     any_success = False
+    candidates = bibliographic_query_variants(row)
     if row.get("tipo") == "Artigos":
-        match, success = crossref_lookup(row)
+        for candidate in candidates:
+            match, success = crossref_lookup(candidate)
+            any_success = any_success or success
+            if match:
+                return match, any_success
+    for candidate in candidates:
+        match, success = google_books_lookup(candidate, state)
         any_success = any_success or success
         if match:
             return match, any_success
-    match, success = google_books_lookup(row, state)
-    any_success = any_success or success
-    if match:
-        return match, any_success
-    match, success = open_library_lookup(row)
-    any_success = any_success or success
-    return match, any_success
+        if not state.get("google_books", True):
+            break
+    for candidate in candidates:
+        match, success = open_library_lookup(candidate)
+        any_success = any_success or success
+        if match:
+            return match, any_success
+    return None, any_success
 
 
 def cache_key(row: dict[str, str]) -> str:
+    return "v4|" + "|".join((row.get("tipo", ""), normalized_bibliographic_text(row.get("titulo_detectado", "")), normalized_bibliographic_text(row.get("autor_detectado", ""))))
+
+
+def legacy_cache_key(row: dict[str, str]) -> str:
+    """Chave da versão anterior, usada apenas para reaproveitar acertos válidos."""
     return "v3|" + "|".join((row.get("tipo", ""), normalized_bibliographic_text(row.get("titulo_detectado", "")), normalized_bibliographic_text(row.get("autor_detectado", ""))))
 
 
@@ -459,26 +557,37 @@ def apply_public_metadata(row: dict[str, str], metadata: dict[str, Any]) -> None
     row["categoria"] = public_category(subjects, row.get("categoria", "Sem_classificacao_confiavel"))
 
 
-def enrich_rows(rows: list[dict[str, str]], report_dir: Path, delay: float) -> None:
+def enrich_rows(rows: list[dict[str, str]], report_dir: Path, delay: float, retry_missing: bool = False) -> None:
     """Preenche metadados externos com cache e retomada segura."""
     report_dir.mkdir(parents=True, exist_ok=True)
     cache_path = report_dir / CACHE_FILENAME
     cache = load_metadata_cache(cache_path)
     state = {"google_books": True}
     candidates = [row for row in rows if row.get("status") != "DUPLICADO"]
-    matched = cached = 0
+    matched = cached = migrated = retried = 0
     print(f"Consultando catálogos públicos para {len(candidates)} itens. Isso pode demorar; é possível interromper e retomar depois.")
     for index, row in enumerate(candidates, 1):
         for field in CSV_FIELDS:
             row.setdefault(field, "")
         key = cache_key(row)
         entry = cache.get(key)
-        if entry is not None:
+        # A versão anterior guardava "não encontrado" depois de uma única
+        # tentativa. Os acertos continuam confiáveis e são migrados; as lacunas
+        # voltam a ser pesquisadas com as variações novas.
+        if entry is None:
+            old_entry = cache.get(legacy_cache_key(row))
+            if old_entry and old_entry.get("status") == "match":
+                entry = old_entry
+                cache[key] = old_entry
+                migrated += 1
+        if entry is not None and not (retry_missing and entry.get("status") == "not_found"):
             cached += 1
             if entry.get("status") == "match":
                 apply_public_metadata(row, entry["metadata"])
                 matched += 1
         else:
+            if entry is not None:
+                retried += 1
             metadata, completed = lookup_public_metadata(row, state)
             if metadata:
                 cache[key] = {"status": "match", "metadata": metadata, "checked_at": datetime.now().isoformat(timespec="seconds")}
@@ -493,6 +602,12 @@ def enrich_rows(rows: list[dict[str, str]], report_dir: Path, delay: float) -> N
         if index == 1 or index % 25 == 0 or index == len(candidates):
             print(f"  {index}/{len(candidates)} — encontrados: {matched}; reaproveitados do cache: {cached}")
     save_metadata_cache(cache_path, cache)
+    if migrated:
+        print(f"  {migrated} acertos da versão anterior foram reaproveitados.")
+    if retried:
+        print(f"  {retried} lacunas anteriores foram consultadas novamente.")
+    if not state.get("google_books", True):
+        print("  Google Books não respondeu nesta sessão. Uma chave gratuita pode ampliar a cobertura na próxima tentativa.")
 
 
 def assign_destinations(rows: list[dict[str, str]]) -> None:
@@ -625,7 +740,7 @@ code{{background:#edf2f7;padding:2px 5px}}
     (report_dir / "relatorio.html").write_text(report, encoding="utf-8")
 
 
-def analyse(source: Path, enrich: bool = False, delay: float = 0.55) -> int:
+def analyse(source: Path, enrich: bool = False, delay: float = 0.55, retry_missing: bool = False) -> int:
     source = source.resolve()
     report_dir = source / APP_DIR
     files = pdf_files(source)
@@ -692,7 +807,7 @@ def analyse(source: Path, enrich: bool = False, delay: float = 0.55) -> int:
         }
         rows.append(row)
     if enrich:
-        enrich_rows(rows, report_dir, delay)
+        enrich_rows(rows, report_dir, delay, retry_missing=retry_missing)
     assign_destinations(rows)
     make_report(source, rows, report_dir)
     print("\nAnalise concluida sem alterar nenhum PDF.")
@@ -703,7 +818,7 @@ def analyse(source: Path, enrich: bool = False, delay: float = 0.55) -> int:
     return 0
 
 
-def enrich_existing(source: Path, delay: float = 0.55) -> int:
+def enrich_existing(source: Path, delay: float = 0.55, retry_missing: bool = False) -> int:
     """Enriquece um relatório já criado, sem reler nem tocar nos PDFs."""
     source = source.resolve()
     report_dir = source / APP_DIR
@@ -719,7 +834,7 @@ def enrich_existing(source: Path, delay: float = 0.55) -> int:
     for row in rows:
         for field in CSV_FIELDS:
             row.setdefault(field, "")
-    enrich_rows(rows, report_dir, delay)
+    enrich_rows(rows, report_dir, delay, retry_missing=retry_missing)
     assign_destinations(rows)
     make_report(source, rows, report_dir)
     print("\nEnriquecimento concluído. Abra novamente o relatório atualizado:")
@@ -779,6 +894,7 @@ def main() -> int:
     parser.add_argument("--pasta", type=Path, help="Pasta raiz que contem os PDFs")
     parser.add_argument("--com-catalogos", action="store_true", help="Durante a análise, também consulta os catálogos públicos")
     parser.add_argument("--pausa", type=float, default=0.55, help="Pausa mínima entre consultas públicas, em segundos")
+    parser.add_argument("--refazer-lacunas", action="store_true", help="Consulta novamente apenas itens sem metadados públicos no cache atual")
     args = parser.parse_args()
     source = args.pasta or choose_folder()
     if source is None:
@@ -788,9 +904,9 @@ def main() -> int:
         print(f"Pasta invalida: {source}", file=sys.stderr)
         return 1
     if args.acao == "analisar":
-        return analyse(source, enrich=args.com_catalogos, delay=max(0.0, args.pausa))
+        return analyse(source, enrich=args.com_catalogos, delay=max(0.0, args.pausa), retry_missing=args.refazer_lacunas)
     if args.acao == "enriquecer":
-        return enrich_existing(source, delay=max(0.0, args.pausa))
+        return enrich_existing(source, delay=max(0.0, args.pausa), retry_missing=args.refazer_lacunas)
     return apply_plan(source)
 
 
