@@ -32,6 +32,26 @@ arquivo: resultados que já foram consultados são reaproveitados.
 Para uma coleção de milhares de itens, deixe a etapa rodando por bastante
 tempo. Evite executar duas cópias dela ao mesmo tempo sobre a mesma coleção.
 
+## 2.1 Recuperar mais livros que ficaram sem resultado
+
+O título lido da primeira página de um PDF pode ser uma página de copyright,
+um sumário ou um título com subtítulo diferente do catálogo. Depois da etapa
+2, execute `04_BUSCAR_MAIS_METADADOS.bat` para revisitar somente os itens que
+continuaram sem dados públicos. Ela tenta o padrão de nome de arquivo
+`Autor - Título` e pequenas variações seguras de título e autor.
+
+Para aumentar a cobertura do Google Books, crie uma chave gratuita, restrita à
+Google Books API, e registre-a uma vez no Windows:
+
+```bat
+setx GOOGLE_BOOKS_API_KEY "COLE_A_SUA_CHAVE_AQUI"
+```
+
+Feche a janela de comandos, abra novamente e então rode a etapa 2.1. A chave
+fica somente no seu Windows; não a coloque em arquivos do projeto ou no GitHub.
+Sem chave, o programa continua usando Open Library e Crossref, mas o Google
+Books pode limitar ou recusar a sessão.
+
 ## 3. Conferir antes de copiar
 
 Abra `relatorio.html` ou `plano_organizacao.csv` no Excel. A coluna
