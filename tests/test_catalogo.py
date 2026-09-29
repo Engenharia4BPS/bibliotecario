@@ -1,4 +1,6 @@
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 import organizar_biblioteca_pdf as app
 
@@ -52,6 +54,41 @@ class CatalogoTests(unittest.TestCase):
             app.unique_destination(row, set()),
             "Livros/A/A. G. Howard/A. G. Howard - O Lado Mais Sombrio.pdf",
         )
+
+    def test_nome_do_arquivo_recupera_titulo_quando_pdf_tem_copyright(self):
+        row = {
+            "arquivo_original": "Audrey Carlan - A Garota do Calendário - 05 - Maio.pdf",
+            "titulo_detectado": "DADOS DE COPYRIGHT",
+            "autor_detectado": "Audrey Carlan",
+        }
+        variants = app.bibliographic_query_variants(row)
+        self.assertEqual(variants[0]["titulo_detectado"], "A Garota do Calendário - 05 - Maio")
+        self.assertEqual(variants[0]["autor_detectado"], "Audrey Carlan")
+
+    def test_acerto_da_versao_anterior_e_reaproveitado(self):
+        row = {
+            "arquivo_original": "Autor - Livro.pdf",
+            "titulo_detectado": "Livro",
+            "autor_detectado": "Autor",
+            "status": "UNICO",
+            "tipo": "Livros_e_Manuais",
+            "ano": "",
+            "categoria": "Sem_classificacao_confiavel",
+        }
+        metadata = {
+            "title": "Livro",
+            "authors": ["Autor"],
+            "year": "2020",
+            "source": "Open Library",
+            "score": 1.0,
+        }
+        with TemporaryDirectory() as directory:
+            report_dir = Path(directory)
+            legacy = {app.legacy_cache_key(row): {"status": "match", "metadata": metadata}}
+            (report_dir / app.CACHE_FILENAME).write_text(app.json.dumps(legacy), encoding="utf-8")
+            app.enrich_rows([row], report_dir, delay=0)
+        self.assertEqual(row["fonte_metadados"], "Open Library")
+        self.assertEqual(row["ano"], "2020")
 
 
 if __name__ == "__main__":
